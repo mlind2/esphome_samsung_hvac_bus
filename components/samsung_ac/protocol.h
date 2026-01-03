@@ -79,6 +79,8 @@ namespace esphome
             virtual void register_address(const std::string address) = 0;
             virtual void set_power(const std::string address, bool value) = 0;
             virtual void set_automatic_cleaning(const std::string address, bool value) = 0;
+            virtual void set_beep(const std::string address, bool value) = 0;
+            virtual void set_display(const std::string address, bool value) = 0;
             virtual void set_water_heater_power(const std::string address, bool value) = 0;
             virtual void set_room_temperature(const std::string address, float value) = 0;
             virtual void set_target_temperature(const std::string address, float value) = 0;
@@ -99,6 +101,12 @@ namespace esphome
             virtual void set_outdoor_cumulative_energy(const std::string &address, float value) = 0;
             virtual void set_outdoor_current(const std::string &address, float value) = 0;
             virtual void set_outdoor_voltage(const std::string &address, float value) = 0;
+            // Usage statistics from 0x2F response (electricity consumption)
+            // Byte 9: Raw statistic value (0-255), represents part of electricity consumption
+            // Byte 11: Raw statistic value (0-255), represents part of electricity consumption
+            // Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
+            virtual void set_usage_statistic_1(const std::string &address, float value) = 0;
+            virtual void set_usage_statistic_2(const std::string &address, float value) = 0;
         };
 
         struct ProtocolRequest
@@ -106,6 +114,10 @@ namespace esphome
         public:
             optional<bool> power;
             optional<bool> automatic_cleaning;
+            optional<bool> beep;                // Beep feature (toggle)
+            optional<bool> display;            // Display feature
+            optional<bool> filter_reset;       // Filter Reset (action)
+            optional<bool> usage_query;        // Usage query
             optional<bool> water_heater_power;
             optional<Mode> mode;
             optional<WaterHeaterMode> waterheatermode;

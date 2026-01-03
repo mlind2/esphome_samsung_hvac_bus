@@ -115,11 +115,19 @@ namespace esphome
       sensor::Sensor *outdoor_cumulative_energy{nullptr};
       sensor::Sensor *outdoor_current{nullptr};
       sensor::Sensor *outdoor_voltage{nullptr};
+      // Usage statistics from 0x2F response (electricity consumption)
+      // Raw byte values from 0x2F Byte 9 and Byte 11
+      // Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
+      sensor::Sensor *usage_statistic_1{nullptr};  // Byte 9: Raw statistic (0-255)
+      sensor::Sensor *usage_statistic_2{nullptr};  // Byte 11: Raw statistic (0-255)
       Samsung_AC_Number *target_temperature{nullptr};
       Samsung_AC_Number *water_outlet_target{nullptr};
       Samsung_AC_Number *target_water_temperature{nullptr};
       Samsung_AC_Switch *power{nullptr};
       Samsung_AC_Switch *automatic_cleaning{nullptr};
+      Samsung_AC_Switch *beep{nullptr};
+      Samsung_AC_Switch *display{nullptr};
+      Samsung_AC_Switch *filter_reset{nullptr};
       Samsung_AC_Switch *water_heater_power{nullptr};
       Samsung_AC_Mode_Select *mode{nullptr};
       Samsung_AC_Water_Heater_Mode_Select *waterheatermode{nullptr};
@@ -240,6 +248,68 @@ namespace esphome
         };
       }
 
+      void set_beep_switch(Samsung_AC_Switch *switch_)
+      {
+        beep = switch_;
+        beep->write_state_ = [this](bool value)
+        {
+          ProtocolRequest request;
+          request.beep = value;
+          publish_request(request);
+        };
+      }
+
+      void set_display_switch(Samsung_AC_Switch *switch_)
+      {
+        display = switch_;
+        display->write_state_ = [this](bool value)
+        {
+          ProtocolRequest request;
+          request.display = value;
+          publish_request(request);
+        };
+      }
+
+      void set_filter_reset_switch(Samsung_AC_Switch *switch_)
+      {
+        filter_reset = switch_;
+        filter_reset->write_state_ = [this](bool value)
+        {
+          if (value)
+          {
+            // Filter Reset is an action - send command when switch is turned ON
+            ProtocolRequest request;
+            request.filter_reset = true;
+            publish_request(request);
+            // Immediately turn switch back OFF (momentary action)
+            if (filter_reset != nullptr)
+              filter_reset->publish_state(false);
+          }
+        };
+      }
+
+      void set_usage_statistic_1_sensor(sensor::Sensor *sensor)
+      {
+        usage_statistic_1 = sensor;
+      }
+
+      void set_usage_statistic_2_sensor(sensor::Sensor *sensor)
+      {
+        usage_statistic_2 = sensor;
+      }
+
+      void update_usage_statistic_1(float value)
+      {
+        if (usage_statistic_1 != nullptr)
+          usage_statistic_1->publish_state(value);
+      }
+
+      void update_usage_statistic_2(float value)
+      {
+        if (usage_statistic_2 != nullptr)
+          usage_statistic_2->publish_state(value);
+      }
+
       void set_water_heater_power_switch(Samsung_AC_Switch *switch_)
       {
         water_heater_power = switch_;
@@ -337,6 +407,8 @@ namespace esphome
 
       optional<bool> _cur_power;
       optional<bool> _cur_automatic_cleaning;
+      optional<bool> _cur_beep;
+      optional<bool> _cur_display;
       optional<bool> _cur_water_heater_power;
       optional<Mode> _cur_mode;
       optional<WaterHeaterMode> _cur_water_heater_mode;
@@ -357,6 +429,20 @@ namespace esphome
           automatic_cleaning->publish_state(value);
         if (climate != nullptr)
           calc_and_publish_mode();
+      }
+
+      void update_beep(bool value)
+      {
+        _cur_beep = value;
+        if (beep != nullptr)
+          beep->publish_state(value);
+      }
+
+      void update_display(bool value)
+      {
+        _cur_display = value;
+        if (display != nullptr)
+          display->publish_state(value);
       }
 
       void update_water_heater_power(bool value)

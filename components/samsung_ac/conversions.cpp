@@ -153,7 +153,7 @@ namespace esphome
 
     FanMode customfanmode_to_fanmode(const std::string &value)
     {
-      if (value == "Turbo")
+      if (str_equals_case_insensitive(value, "Turbo"))
         return FanMode::Turbo;
       return FanMode::Auto;
     }
@@ -180,6 +180,31 @@ namespace esphome
       default:
         return "None";
       }
+    }
+    
+    // Helper function to map AltModeName to 0xF5 Byte 4 value for non-NASA protocol
+    // Returns the Byte 4 value for the preset mode (OFF state = lower value, ON state = higher value)
+    uint8_t altmodename_to_f5_byte4_off(const AltModeName& name, bool on)
+    {
+      // Based on analysis:
+      // Quiet: 0x0c (OFF) / 0x0d (ON)
+      // Comfort: 0x20 (OFF) / 0x21 (ON)
+      // Fast: 0x37 (OFF) / 0x38 (ON)
+      // Single User: 0x46 (OFF) / 0x47 (ON)
+      // SPi (S-plasma Ion): 0x55 (OFF) / 0x56 (ON)
+      
+      if (str_equals_case_insensitive(name, "QUIET"))
+        return on ? 0x0d : 0x0c;
+      if (str_equals_case_insensitive(name, "COMFORT"))
+        return on ? 0x21 : 0x20;
+      if (str_equals_case_insensitive(name, "FAST"))
+        return on ? 0x38 : 0x37;
+      if (str_equals_case_insensitive(name, "SINGLEUSER") || str_equals_case_insensitive(name, "SINGLE USER"))
+        return on ? 0x47 : 0x46;
+      if (str_equals_case_insensitive(name, "SPI") || str_equals_case_insensitive(name, "S-PLASMA ION") || str_equals_case_insensitive(name, "S_PLASMA_ION") || str_equals_case_insensitive(name, "VIRUSDOCTOR") || str_equals_case_insensitive(name, "VIRUS DOCTOR"))
+        return on ? 0x56 : 0x55;
+      
+      return 0x00; // Unknown preset
     }
 
     optional<climate::ClimatePreset> altmodename_to_preset(const AltModeName& name)

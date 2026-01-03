@@ -73,13 +73,24 @@ samsung_ac:
     vertical_swing: true
     horizontal_swing: true
     # Presets define special AC modes like Windfree, Eco, and so on. 
-    # The following modes are available: sleep, quiet, fast, longreach, windfree, eco.
+    # The following modes are available: sleep, quiet, fast, comfort, singleuser, longreach, windfree, eco, spi.
+    # Note: comfort, singleuser, and spi are only available on non-NASA devices.
     presets: 
       # Short version - a quick and simple way to enable presets.
       quiet: true
       # Long version - allows customization, including localized names and control over enabling the presets.
       fast:
         name: "Fast cooling"
+        enabled: true
+      # Additional presets for non-NASA devices
+      comfort:
+        name: "Comfort mode"
+        enabled: true
+      singleuser:
+        name: "Single User mode"
+        enabled: true
+      spi:
+        name: "SPi (S-plasma Ion)"
         enabled: true
 
   devices:
@@ -137,6 +148,23 @@ samsung_ac:
       room_humidity:
         name: "Kitchen humidity"
       
+    # Example for non-NASA device (address format: "00", "01", etc.)
+    # Note: The new features (beep, display, filter_reset, usage_statistic_1, usage_statistic_2)
+    # and presets (comfort, singleuser, spi) are only available on non-NASA devices.
+    # - address: "00" # Non-NASA indoor device address
+    #   climate:
+    #     name: "Living Room climate"
+    #   beep:
+    #     name: "Living Room beep sound"
+    #   display:
+    #     name: "Living Room display lighting"
+    #   filter_reset:
+    #     name: "Living Room filter reset"
+    #   usage_statistic_1:
+    #     name: "Living Room usage statistic 1"
+    #   usage_statistic_2:
+    #     name: "Living Room usage statistic 2"
+    
     - address: "10.00.00" # Outdoor device address as the following components are dependent on an outdoor unit.
       # This sensor captures and monitors specific error codes returned by the HVAC system.
       # When an error occurs, the sensor detects the error code and updates its value accordingly.

@@ -2,7 +2,7 @@
 
 #include <list>
 #include <vector>
-#include <optional>
+#include "esphome/core/optional.h"
 #include "protocol.h"
 #include "util.h"
 
@@ -129,6 +129,65 @@ namespace esphome
             std::string to_string();
         };
 
+        struct NonNasaCommand1C // Feature status response from indoor unit
+        {
+            uint8_t feature_status_byte = 0; // Byte 4: Bit 0=Beep, Bit 3=Clean, etc.
+            
+            std::string to_string()
+            {
+                return "feature_status_byte:0x" + long_to_hex(feature_status_byte);
+            };
+        };
+
+        struct NonNasaCommand21 // Display status response
+        {
+            uint8_t display_status = 0; // Byte 7: Display ON/OFF
+            
+            std::string to_string()
+            {
+                return "display_status:0x" + long_to_hex(display_status);
+            };
+        };
+
+        struct NonNasaCommand28 // Preset/mode status response
+        {
+            uint8_t preset_status = 0; // Byte 4: Current preset/mode status
+            
+            std::string to_string()
+            {
+                return "preset_status:0x" + long_to_hex(preset_status);
+            };
+        };
+
+        struct NonNasaCommand2F // Usage statistics response (electricity consumption)
+        {
+            // Raw byte values from 0x2F response
+            // Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
+            uint8_t usage_byte_9 = 0;  // Byte 9: Raw electricity consumption statistic (0-255)
+            uint8_t usage_byte_11 = 0;  // Byte 11: Raw electricity consumption statistic (0-255)
+            
+            std::string to_string()
+            {
+                return "usage_statistic_1(Byte9):0x" + long_to_hex(usage_byte_9) + " usage_statistic_2(Byte11):0x" + long_to_hex(usage_byte_11);
+            };
+        };
+
+        struct NonNasaCommandF5 // Preset control command (can be sent by us or remote)
+        {
+            uint8_t preset_byte4 = 0; // Byte 4: Encodes preset type and state
+            // Byte 4 values:
+            // 0x0c/0x0d = Quiet (OFF/ON)
+            // 0x20/0x21 = Comfort (OFF/ON)
+            // 0x37/0x38 = Fast (OFF/ON)
+            // 0x46/0x47 = Single User (OFF/ON)
+            // 0x55/0x56 = SPi (OFF/ON)
+            
+            std::string to_string()
+            {
+                return "preset_byte4:0x" + long_to_hex(preset_byte4);
+            };
+        };
+
         struct NonNasaCommandRaw
         {
             uint8_t length;
@@ -143,7 +202,11 @@ namespace esphome
 
         enum class NonNasaCommand : uint8_t
         {
+            Cmd1C = 0x1c,
             Cmd20 = 0x20,
+            Cmd21 = 0x21,
+            Cmd28 = 0x28,
+            Cmd2F = 0x2f,
             Cmd54 = 0x54,
             Cmd8D = 0x8d,
             CmdC0 = 0xc0,
@@ -152,6 +215,7 @@ namespace esphome
             CmdF0 = 0xf0,
             CmdF1 = 0xf1,
             CmdF3 = 0xf3,
+            CmdF5 = 0xf5,
             CmdF8 = 0xF8,
         };
 
@@ -168,7 +232,11 @@ namespace esphome
 
             union
             {
+                NonNasaCommand1C command1C; // Feature status
                 NonNasaCommand20 command20;
+                NonNasaCommand21 command21; // Display status
+                NonNasaCommand28 command28; // Preset/mode status
+                NonNasaCommand2F command2F; // Usage statistics
                 NonNasaCommandRaw command54; // Control message ack
                 NonNasaCommand8D command8D;
                 NonNasaCommandC0 commandC0;
@@ -177,6 +245,7 @@ namespace esphome
                 NonNasaCommandF0 commandF0;
                 NonNasaCommandF1 commandF1;
                 NonNasaCommandF3 commandF3;
+                NonNasaCommandF5 commandF5; // Preset control (sent by us or remote)
                 NonNasaCommandRaw commandF8; // Unknown structure for now
                 NonNasaCommandRaw commandRaw;
             };
@@ -195,6 +264,14 @@ namespace esphome
             NonNasaMode mode = NonNasaMode::Heat;
             bool power = false;
             NonNasaWindDirection wind_direction = NonNasaWindDirection::Stop;
+            
+            // New feature flags
+            optional<bool> automatic_cleaning; // Clean feature
+            optional<bool> beep;                // Beep feature (toggle)
+            optional<bool> display;            // Display feature
+            optional<bool> filter_reset;       // Filter Reset (action)
+            optional<bool> usage_query;        // Usage query
+            optional<AltMode> alt_mode;        // Preset modes (Quiet, Comfort, Fast, Single User, SPi)
 
             std::vector<uint8_t> encode();
             std::string to_string();

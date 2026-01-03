@@ -68,6 +68,11 @@ CONF_DEVICE_WATER_TEMPERATURE = "water_temperature"
 CONF_DEVICE_WATER_TARGET_TEMPERATURE = "water_target_temperature"
 CONF_DEVICE_POWER = "power"
 CONF_DEVICE_AUTOMATIC_CLEANING = "automatic_cleaning"
+CONF_DEVICE_BEEP = "beep"
+CONF_DEVICE_DISPLAY = "display"
+CONF_DEVICE_FILTER_RESET = "filter_reset"
+CONF_DEVICE_USAGE_STATISTIC_1 = "usage_statistic_1"  # Electricity consumption raw value from 0x2F Byte 9
+CONF_DEVICE_USAGE_STATISTIC_2 = "usage_statistic_2"  # Electricity consumption raw value from 0x2F Byte 11
 CONF_DEVICE_WATER_HEATER_POWER = "water_heater_power"
 CONF_DEVICE_MODE = "mode"
 CONF_DEVICE_WATER_HEATER_MODE = "water_heater_mode"
@@ -113,9 +118,12 @@ PRESETS = {
     "sleep": {"value": 1, "displayName": "Sleep"},
     "quiet": {"value": 2, "displayName": "Quiet"},
     "fast": {"value": 3, "displayName": "Fast"},
+    "comfort": {"value": 4, "displayName": "Comfort"},
+    "singleuser": {"value": 5, "displayName": "Single User"},
     "longreach": {"value": 6, "displayName": "LongReach"},
     "eco": {"value": 7, "displayName": "Eco"},
     "windfree": {"value": 9, "displayName": "WindFree"},
+    "spi": {"value": 10, "displayName": "SPi"},
 }
 
 CAPABILITIES_SCHEMA = cv.Schema(
@@ -238,6 +246,23 @@ DEVICE_SCHEMA = cv.Schema(
         cv.Optional(CONF_DEVICE_POWER): switch.switch_schema(Samsung_AC_Switch),
         cv.Optional(CONF_DEVICE_AUTOMATIC_CLEANING): switch.switch_schema(
             Samsung_AC_Switch
+        ),
+        cv.Optional(CONF_DEVICE_BEEP): switch.switch_schema(Samsung_AC_Switch),
+        cv.Optional(CONF_DEVICE_DISPLAY): switch.switch_schema(Samsung_AC_Switch),
+        cv.Optional(CONF_DEVICE_FILTER_RESET): switch.switch_schema(Samsung_AC_Switch),
+        cv.Optional(CONF_DEVICE_USAGE_STATISTIC_1): sensor.sensor_schema(
+            unit_of_measurement="",
+            accuracy_decimals=0,
+            # Raw byte value from 0x2F response Byte 9
+            # Represents electricity consumption statistic (range: 0-255)
+            # Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
+        ),
+        cv.Optional(CONF_DEVICE_USAGE_STATISTIC_2): sensor.sensor_schema(
+            unit_of_measurement="",
+            accuracy_decimals=0,
+            # Raw byte value from 0x2F response Byte 11
+            # Represents electricity consumption statistic (range: 0-255)
+            # Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
         ),
         cv.Optional(CONF_DEVICE_WATER_HEATER_POWER): switch.switch_schema(
             Samsung_AC_Switch
@@ -428,6 +453,11 @@ async def to_code(config):
                 switch.new_switch,
                 var_dev.set_automatic_cleaning_switch,
             ),
+            CONF_DEVICE_BEEP: (switch.new_switch, var_dev.set_beep_switch),
+            CONF_DEVICE_DISPLAY: (switch.new_switch, var_dev.set_display_switch),
+            CONF_DEVICE_FILTER_RESET: (switch.new_switch, var_dev.set_filter_reset_switch),
+            CONF_DEVICE_USAGE_STATISTIC_1: (sensor.new_sensor, var_dev.set_usage_statistic_1_sensor),
+            CONF_DEVICE_USAGE_STATISTIC_2: (sensor.new_sensor, var_dev.set_usage_statistic_2_sensor),
             CONF_DEVICE_WATER_HEATER_POWER: (
                 switch.new_switch,
                 var_dev.set_water_heater_power_switch,

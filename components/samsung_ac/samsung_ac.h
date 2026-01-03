@@ -173,6 +173,18 @@ namespace esphome
                                  { dev->update_automatic_cleaning(value); });
       }
 
+      void set_beep(const std::string address, bool value) override
+      {
+        execute_if_device_exists(address, [value](Samsung_AC_Device *dev)
+                                 { dev->update_beep(value); });
+      }
+
+      void set_display(const std::string address, bool value) override
+      {
+        execute_if_device_exists(address, [value](Samsung_AC_Device *dev)
+                                 { dev->update_display(value); });
+      }
+
       void set_water_heater_power(const std::string address, bool value) override
       {
         execute_if_device_exists(address, [value](Samsung_AC_Device *dev)
@@ -245,6 +257,18 @@ namespace esphome
       void set_outdoor_voltage(const std::string &address, float value)
       {
         update_device_sensor(address, &Samsung_AC_Device::outdoor_voltage, value);
+      }
+
+      void set_usage_statistic_1(const std::string &address, float value) override
+      {
+        execute_if_device_exists(address, [value](Samsung_AC_Device *dev)
+                                 { dev->update_usage_statistic_1(value); });
+      }
+
+      void set_usage_statistic_2(const std::string &address, float value) override
+      {
+        execute_if_device_exists(address, [value](Samsung_AC_Device *dev)
+                                 { dev->update_usage_statistic_2(value); });
       }
 
     protected:
