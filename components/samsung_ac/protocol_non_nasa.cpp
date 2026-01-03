@@ -2,12 +2,21 @@
 #include <map>
 #include <cmath>
 #include <string>
+#include <cassert>
+#include <utility>
 #include "esphome/core/hal.h"
 #include "util.h"
 #include "log.h"
 #include "protocol_non_nasa.h"
 
 std::map<std::string, esphome::samsung_ac::NonNasaCommand20> last_command20s_;
+// Track last preset state per device:
+// - Set when we send a preset command (before confirmation)
+// - Updated when we receive Cmd28/CmdF5 (after confirmation)
+// - Used to resolve ambiguous Cmd28 status (0x01, 0x02)
+// - Used when clearing preset (AltMode=0)
+// Persists until explicitly cleared (AltMode=0) or overwritten
+std::map<std::string, esphome::samsung_ac::AltMode> last_preset_sent_;
 
 esphome::samsung_ac::NonNasaDataPacket nonpacket_;
 
@@ -18,6 +27,7 @@ namespace esphome
         static bool pending_keepalive_ = false;
         static uint32_t pending_keepalive_due_ms_ = 0;
         static uint32_t last_keepalive_sent_ms_ = 0;
+        uint32_t last_keepalive_response = 0; // For testing: timestamp of last keepalive response
         constexpr uint32_t KEEPALIVE_DELAY_MS = 30;
         constexpr uint32_t KEEPALIVE_MIN_INTERVAL_MS = 5000;
 
@@ -221,9 +231,34 @@ namespace esphome
             str += "cmd:" + long_to_hex((uint8_t)cmd) + ";";
             switch (cmd)
             {
+            case NonNasaCommand::Cmd1C:
+            {
+                str += "command1C:{" + command1C.to_string() + "}";
+                break;
+            }
             case NonNasaCommand::Cmd20:
             {
                 str += "command20:{" + command20.to_string() + "}";
+                break;
+            }
+            case NonNasaCommand::Cmd21:
+            {
+                str += "command21:{" + command21.to_string() + "}";
+                break;
+            }
+            case NonNasaCommand::Cmd28:
+            {
+                str += "command28:{" + command28.to_string() + "}";
+                break;
+            }
+            case NonNasaCommand::Cmd2F:
+            {
+                str += "command2F:{" + command2F.to_string() + "}";
+                break;
+            }
+            case NonNasaCommand::CmdF5:
+            {
+                str += "commandF5:{" + commandF5.to_string() + "}";
                 break;
             }
             case NonNasaCommand::CmdC0:
@@ -308,6 +343,12 @@ namespace esphome
             cmd = (NonNasaCommand)data[3];
             switch (cmd)
             {
+            case NonNasaCommand::Cmd1C:
+                // Feature status response from indoor unit
+                // Byte 4: Bit 0=Beep, Bit 3=Clean, etc.
+                command1C.feature_status_byte = data[4];
+                return {DecodeResultType::Processed, 14};
+
             case NonNasaCommand::Cmd20:
                 command20.target_temp = data[4] - 55;
                 command20.room_temp = data[5] - 55;
@@ -321,6 +362,31 @@ namespace esphome
                 if (command20.wind_direction == (NonNasaWindDirection)0)
                     command20.wind_direction = NonNasaWindDirection::Stop;
 
+                return {DecodeResultType::Processed, 14};
+
+            case NonNasaCommand::Cmd21:
+                // Display status response
+                // Byte 7: Display ON/OFF status
+                command21.display_status = data[7];
+                return {DecodeResultType::Processed, 14};
+
+            case NonNasaCommand::Cmd28:
+                // Preset/mode status response
+                // Byte 4: Current preset/mode status
+                command28.preset_status = data[4];
+                return {DecodeResultType::Processed, 14};
+
+            case NonNasaCommand::Cmd2F:
+                // Usage statistics response
+                // Byte 9 and Byte 11: Usage data
+                command2F.usage_byte_9 = data[9];
+                command2F.usage_byte_11 = data[11];
+                return {DecodeResultType::Processed, 14};
+
+            case NonNasaCommand::CmdF5:
+                // Preset control command (can be sent by us or remote control)
+                // Byte 4: Encodes preset type and state
+                commandF5.preset_byte4 = data[4];
                 return {DecodeResultType::Processed, 14};
 
             case NonNasaCommand::CmdC0:
@@ -516,6 +582,346 @@ namespace esphome
             return data;
         }
 
+        // Helper function to encode 0xC9 (Clean) command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_clean_command(const std::string &dst, bool clean_on)
+        {
+            // Based on log analysis: Clean OFF = 0x00, Clean ON = 0x01 in Byte 4
+            // Example: 00114075a6740001f6 (OFF) or 011729706cf30001d0 (ON)
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0xC9,                     // 03 cmd (Clean)
+                (uint8_t)(clean_on ? 0x01 : 0x00),   // 04 Clean state (0x00=OFF, 0x01=ON)
+                0x11,                     // 05 (from example)
+                0x40,                     // 06 (from example)
+                0x75,                     // 07 (from example)
+                0xa6,                     // 08 (from example)
+                0x74,                     // 09 (from example)
+                0x00,                     // 10 (from example)
+                0x01,                     // 11 (from example)
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            data[12] = build_checksum(data);
+            return data;
+        }
+
+        // Helper function to encode 0x89 (Beep) toggle command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_beep_command(const std::string &dst)
+        {
+            // Based on log analysis: Beep is a toggle, same data always: 2f000000000000006e
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0x89,                     // 03 cmd (Beep)
+                0x2F,                     // 04 (from example)
+                0x00,                     // 05
+                0x00,                     // 06
+                0x00,                     // 07
+                0x00,                     // 08
+                0x00,                     // 09
+                0x00,                     // 10
+                0x00,                     // 11
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            // Note: checksum in example is 0x6e, but we'll calculate it
+            data[12] = build_checksum(data);
+            return data;
+        }
+
+        // Helper function to encode 0x82 (Display) command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_display_command(const std::string &dst, bool display_on)
+        {
+            // Based on log analysis: Display ON = 0x01, Display OFF = 0x02 in Byte 4
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0x82,                     // 03 cmd (Display)
+                (uint8_t)(display_on ? 0x01 : 0x02), // 04 Display state (0x01=ON, 0x02=OFF)
+                0x00,                     // 05
+                0x00,                     // 06
+                0x00,                     // 07
+                0x00,                     // 08
+                0x00,                     // 09
+                0x00,                     // 10
+                0x00,                     // 11
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            data[12] = build_checksum(data);
+            return data;
+        }
+
+        // Helper function to encode 0xA9 (Filter Reset) command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_filter_reset_command(const std::string &dst)
+        {
+            // Based on log analysis: Filter Reset has Byte 8 = 0x80 (bit 7 set)
+            // Example: 0000001480000000f5
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0xA9,                     // 03 cmd (Filter Reset)
+                0x00,                     // 04
+                0x00,                     // 05
+                0x00,                     // 06
+                0x14,                     // 07 (from example)
+                0x80,                     // 08 (bit 7 set = 0x80) - Filter Reset flag
+                0x00,                     // 09
+                0x00,                     // 10
+                0x00,                     // 11
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            data[12] = build_checksum(data);
+            return data;
+        }
+
+        // Helper function to encode 0x80 (Usage Query) command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_usage_query_command(const std::string &dst)
+        {
+            // Based on log analysis: Usage query has data: 00000050020000001a
+            // From log: 32c8008000000050020000001a34
+            // Byte 7 = 0x50, Byte 8 = 0x02, Byte 9 = 0x00
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0x80,                     // 03 cmd (Usage Query)
+                0x00,                     // 04
+                0x00,                     // 05
+                0x00,                     // 06
+                0x50,                     // 07 (from example: 0x50)
+                0x02,                     // 08 (from example: 0x02)
+                0x00,                     // 09 (from example: 0x00)
+                0x00,                     // 10
+                0x00,                     // 11
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            data[12] = build_checksum(data);
+            return data;
+        }
+
+        // Helper function to map 0x28 Byte 4 status value to AltMode
+        // Since presets are mutually exclusive, we use the last preset sent to disambiguate
+        // ambiguous values (0x01, 0x02 can mean different presets)
+        
+        // Helper function to validate if an AltMode value is a valid preset hint
+        // Valid presets: 2 (Quiet), 3 (Fast), 4 (Comfort), 5 (Single User), 10 (SPi)
+        static bool is_valid_preset_hint(AltMode hint)
+        {
+            return hint == 2 || hint == 3 || hint == 4 || hint == 5 || hint == 10;
+        }
+        
+        // Helper function to get preset name from AltMode value
+        // Returns human-readable preset name for logging
+        static const char* get_preset_name(AltMode alt_mode)
+        {
+            static const char* preset_names[] = {"None", "", "Quiet", "Fast", "Comfort", "Single User", "", "", "", "", "SPi"};
+            if (alt_mode < sizeof(preset_names)/sizeof(preset_names[0]))
+                return preset_names[alt_mode];
+            return "Unknown";
+        }
+        
+        // Helper function to get preset hint for an address
+        // Returns 0 if no hint exists
+        static AltMode get_preset_hint(const std::string& address)
+        {
+            auto it = last_preset_sent_.find(address);
+            if (it != last_preset_sent_.end())
+                return it->second;
+            return 0;
+        }
+        
+        // Helper function to get valid preset hint for an address
+        // Returns true if valid hint exists, false otherwise
+        // Sets out_hint to the hint value (or 0 if invalid)
+        static bool get_valid_preset_hint(const std::string& address, AltMode& out_hint)
+        {
+            auto it = last_preset_sent_.find(address);
+            if (it != last_preset_sent_.end() && is_valid_preset_hint(it->second))
+            {
+                out_hint = it->second;
+                return true;
+            }
+            out_hint = 0;
+            return false;
+        }
+
+        // Helper function to set preset hint for an address
+        // Only sets hint if value is valid (validates before setting)
+        // Returns true if hint was set, false if value is invalid
+        static bool set_preset_hint(const std::string& address, AltMode alt_mode)
+        {
+            if (is_valid_preset_hint(alt_mode) || alt_mode == 0)
+            {
+                last_preset_sent_[address] = alt_mode;
+                return true;
+            }
+            // Invalid hint value - don't set
+            if (debug_log_messages)
+            {
+                LOGW("Attempted to set invalid preset hint for %s: AltMode=%d (not setting)", address.c_str(), alt_mode);
+            }
+            return false;
+        }
+
+        // Helper function to clear preset hint for an address
+        // Sets hint to 0 (None)
+        static void clear_preset_hint(const std::string& address)
+        {
+            last_preset_sent_[address] = 0;
+        }
+        
+
+        // Helper function to map 0xF5 Byte 4 value to AltMode (reverse of altmode_to_f5_byte4)
+        // Used when we receive 0xF5 commands from remote control or other sources
+        // Returns AltMode value (0 if not a valid preset)
+        static AltMode f5_byte4_to_altmode(uint8_t byte4)
+        {
+            // Based on FEATURE_MAPPING.md analysis:
+            // Quiet: 0x0c (OFF) / 0x0d (ON) - AltMode value 2
+            // Fast: 0x37 (OFF) / 0x38 (ON) - AltMode value 3
+            // Comfort: 0x20 (OFF) / 0x21 (ON) - AltMode value 4
+            // Single User: 0x46 (OFF) / 0x47 (ON) - AltMode value 5
+            // SPi (S-plasma Ion): 0x55 (OFF) / 0x56 (ON) - AltMode value 10
+            
+            switch (byte4)
+            {
+            case 0x0c:
+            case 0x0d:
+                return 2; // Quiet
+            case 0x37:
+            case 0x38:
+                return 3; // Fast
+            case 0x20:
+            case 0x21:
+                return 4; // Comfort
+            case 0x46:
+            case 0x47:
+                return 5; // Single User
+            case 0x55:
+            case 0x56:
+                return 10; // SPi (S-plasma Ion)
+            default:
+                return 0; // Unknown or not a preset command
+            }
+        }
+
+        // Helper function to map AltMode value to 0xF5 Byte 4 value
+        // Returns the Byte 4 value for the preset mode (OFF state = lower value, ON state = higher value)
+        // AltMode values from __init__.py PRESETS:
+        //   "quiet": 2, "fast": 3, "comfort": 4, "singleuser": 5, "spi": 10
+        static uint8_t altmode_to_f5_byte4(AltMode alt_mode, bool on)
+        {
+            // Based on analysis:
+            // Quiet: 0x0c (OFF) / 0x0d (ON) - AltMode value 2
+            // Fast: 0x37 (OFF) / 0x38 (ON) - AltMode value 3
+            // Comfort: 0x20 (OFF) / 0x21 (ON) - AltMode value 4
+            // Single User: 0x46 (OFF) / 0x47 (ON) - AltMode value 5
+            // SPi (S-plasma Ion): 0x55 (OFF) / 0x56 (ON) - AltMode value 10
+            
+            switch (alt_mode)
+            {
+            case 2: // Quiet
+                return on ? 0x0d : 0x0c;
+            case 3: // Fast
+                return on ? 0x38 : 0x37;
+            case 4: // Comfort
+                return on ? 0x21 : 0x20;
+            case 5: // Single User
+                return on ? 0x47 : 0x46;
+            case 10: // SPi (S-plasma Ion)
+                return on ? 0x56 : 0x55;
+            default:
+                return 0x00; // Unknown or not a 0xF5 preset
+            }
+        }
+
+        // Helper function to get Byte 5 value for 0xF5 preset command
+        // Byte 5 varies by preset type and state (ON/OFF)
+        static uint8_t get_f5_byte5(AltMode alt_mode, bool on)
+        {
+            // Based on actual packet analysis from FEATURE_MAPPING.md:
+            switch (alt_mode)
+            {
+            case 2: // Quiet
+                return on ? 0x0f : 0x46;
+            case 3: // Fast
+                return on ? 0x04 : 0x02;
+            case 4: // Comfort
+                return on ? 0x13 : 0x01;
+            case 5: // Single User
+                return on ? 0x1e : 0x01;
+            case 10: // SPi (S-plasma Ion)
+                return on ? 0x3b : 0x64;
+            default:
+                return 0x01; // Default fallback
+            }
+        }
+
+        // Helper function to get Byte 10-11 values for 0xF5 preset command
+        // These bytes vary by preset type and state
+        static std::pair<uint8_t, uint8_t> get_f5_bytes_10_11(AltMode alt_mode, bool on)
+        {
+            // Based on actual packet analysis from FEATURE_MAPPING.md:
+            switch (alt_mode)
+            {
+            case 2: // Quiet
+                return on ? std::make_pair(0x00, 0x11) : std::make_pair(0x00, 0xeb);
+            case 3: // Fast
+                return on ? std::make_pair(0x00, 0x66) : std::make_pair(0x00, 0x3c);
+            case 4: // Comfort
+                return on ? std::make_pair(0x1b, 0x15) : std::make_pair(0x1b, 0x16);
+            case 5: // Single User
+                return on ? std::make_pair(0x00, 0x00) : std::make_pair(0x00, 0xa7);
+            case 10: // SPi (S-plasma Ion)
+                return on ? std::make_pair(0x00, 0x8a) : std::make_pair(0x00, 0x29);
+            default:
+                return std::make_pair(0x00, 0x00); // Default fallback
+            }
+        }
+
+        // Helper function to encode 0xF5 (Preset Mode) command
+        // Direction: c8 (outdoor) → 00 (indoor)
+        static std::vector<uint8_t> encode_preset_command(const std::string &dst, AltMode alt_mode, bool on)
+        {
+            // Based on log analysis: 0xF5 with Byte 4 encoding the preset and state
+            // Bytes 5, 10, and 11 vary by preset type and state
+            uint8_t byte4 = altmode_to_f5_byte4(alt_mode, on);
+            uint8_t byte5 = get_f5_byte5(alt_mode, on);
+            auto bytes_10_11 = get_f5_bytes_10_11(alt_mode, on);
+            
+            std::vector<uint8_t> data{
+                0x32,                     // 00 start
+                0xC8,                     // 01 src (outdoor unit)
+                (uint8_t)hex_to_int(dst), // 02 dst (indoor unit)
+                0xF5,                     // 03 cmd (Preset)
+                byte4,                   // 04 Preset type and state
+                byte5,                   // 05 Varies by preset and state
+                0x6e,                     // 06 Constant (from all examples)
+                0x64,                     // 07 Constant (from all examples)
+                0x5a,                     // 08 Constant (from all examples)
+                0x3e,                     // 09 Constant (from all examples)
+                bytes_10_11.first,        // 10 Varies by preset and state
+                bytes_10_11.second,       // 11 Varies by preset and state
+                0,                        // 12 crc (will be calculated)
+                0x34                      // 13 end
+            };
+            data[12] = build_checksum(data);
+            return data;
+        }
+
         NonNasaRequest NonNasaRequest::create(std::string dst_address)
         {
             NonNasaRequest request;
@@ -571,8 +977,164 @@ namespace esphome
             }
         }
 
+
+        // Helper function to send feature commands with logging
+        // Returns true if publish_request() should return early (don't queue NonNasaRequest)
+        static bool send_feature_command(
+            MessageTarget* target,
+            const std::string& address,
+            const std::string& feature_name,
+            uint8_t command_code,
+            std::vector<uint8_t>&& command_data,
+            const std::string& expected_response = "",
+            bool should_return = true)
+        {
+            if (debug_log_messages)
+            {
+                if (!expected_response.empty())
+                {
+                    LOGD("Sending %s command (0x%02X) to %s (expecting %s)",
+                        feature_name.c_str(), command_code, address.c_str(), expected_response.c_str());
+                }
+                else
+                {
+                    LOGD("Sending %s command (0x%02X) to %s",
+                        feature_name.c_str(), command_code, address.c_str());
+                }
+                
+                if (debug_log_undefined_messages)
+                {
+                    LOGD("%s packet: %s", feature_name.c_str(), bytes_to_hex(command_data).c_str());
+                }
+            }
+            
+            target->publish_data(0, std::move(command_data));
+            
+            // Return true if publish_request() should return early (don't queue NonNasaRequest)
+            return should_return;
+        }
+
+        // Helper function to send preset command with logging
+        static void send_preset_command(
+            MessageTarget* target,
+            const std::string& address,
+            AltMode alt_mode,
+            bool on)
+        {
+            auto preset_cmd = encode_preset_command(address, alt_mode, on);
+            target->publish_data(0, std::move(preset_cmd));
+        }
+
+        // Maps Cmd28 preset_status byte to AltMode value
+        // Returns: (alt_mode, should_update)
+        // Handles ambiguous status (0x01, 0x02) using hints
+        static std::pair<AltMode, bool> resolve_cmd28_preset_status(
+            uint8_t preset_status,
+            AltMode hint,
+            bool hint_exists,
+            const std::string& src_address)
+        {
+            bool has_valid_hint = hint_exists && is_valid_preset_hint(hint);
+            AltMode alt_mode = 0;
+            bool should_update = true;
+
+            // Map preset_status to AltMode
+            if (preset_status == 0x00)
+            {
+                alt_mode = 0; // None
+            }
+            else if (preset_status == 0x03)
+            {
+                alt_mode = 4; // Comfort (unique - only Comfort shows 0x03)
+            }
+            else if (preset_status == 0x01 || preset_status == 0x02)
+            {
+                // Ambiguous - use hint if available
+                if (has_valid_hint)
+                {
+                    alt_mode = hint;
+                }
+                else
+                {
+                    // No valid hint - ignore to prevent clearing
+                    should_update = false;
+                }
+            }
+            else if (preset_status > 0x03)
+            {
+                // Unknown status - map to None
+                // Always update UI (set_altmode) but preserve hint if available
+                alt_mode = 0; // None
+                // should_update remains true to update UI, but hint preservation is handled below
+            }
+
+            // Handle 0x00 (None) when we have valid hint - might be transition state
+            if (preset_status == 0x00 && has_valid_hint)
+            {
+                should_update = false;
+            }
+
+            return {alt_mode, should_update};
+        }
+
+
         void NonNasaProtocol::publish_request(MessageTarget *target, const std::string &address, ProtocolRequest &request)
         {
+            // Handle feature commands first (these are sent directly, not queued)
+            if (request.automatic_cleaning.has_value())
+            {
+                // Send Clean command (0xC9)
+                auto clean_cmd = encode_clean_command(address, request.automatic_cleaning.value());
+                // Defensive check: ensure vector has expected size before accessing
+                assert(clean_cmd.size() >= 5);
+                std::string clean_state = clean_cmd.at(4) == 0x01 ? "ON" : "OFF";
+                std::string clean_response = "0x1C or 0x2D response: " + clean_state;
+                if (send_feature_command(target, address, "Clean", 0xC9, std::move(clean_cmd),
+                    clean_response, true))
+                    return; // Don't queue NonNasaRequest
+            }
+            
+            if (request.beep.has_value())
+            {
+                // Send Beep toggle command (0x89)
+                // Note: 0x89 is a toggle command - same data always toggles state
+                // We send the command and let the status update from 0x1C response
+                auto beep_cmd = encode_beep_command(address);
+                if (send_feature_command(target, address, "Beep toggle", 0x89, std::move(beep_cmd),
+                    "0x20 response, status in 0x1C", true))
+                    return; // Don't queue NonNasaRequest
+            }
+            
+            if (request.display.has_value())
+            {
+                // Send Display command (0x82)
+                auto display_cmd = encode_display_command(address, request.display.value());
+                std::string display_state = request.display.value() ? "ON" : "OFF";
+                std::string display_response = "0x25 acknowledgment, status in 0x21: " + display_state;
+                if (send_feature_command(target, address, "Display", 0x82, std::move(display_cmd),
+                    display_response, true))
+                    return; // Don't queue NonNasaRequest
+            }
+            
+            if (request.filter_reset.has_value() && request.filter_reset.value())
+            {
+                // Send Filter Reset command (0xA9)
+                // This is an action command - send it and don't queue 0xB0
+                auto reset_cmd = encode_filter_reset_command(address);
+                send_feature_command(target, address, "Filter Reset", 0xA9, std::move(reset_cmd),
+                    "0x2D or 0x20 response", false);
+                // Note: should_return=false, so we continue to queue NonNasaRequest if needed
+            }
+            
+            if (request.usage_query.has_value() && request.usage_query.value())
+            {
+                // Send Usage query command (0x80)
+                auto usage_cmd = encode_usage_query_command(address);
+                send_feature_command(target, address, "Usage query", 0x80, std::move(usage_cmd),
+                    "", false);
+                // Note: should_return=false, so we continue to queue NonNasaRequest if needed
+            }
+            
             auto req = NonNasaRequest::create(address);
 
             if (request.mode)
@@ -590,15 +1152,92 @@ namespace esphome
             if (request.fan_mode)
                 req.fanspeed = fanmode_to_nonnasa_fanspeed(request.fan_mode.value());
 
-            if (request.alt_mode)
-            {
-                LOGW("change altmode is currently not implemented");
-            }
-
             if (request.swing_mode)
             {
                 NonNasaWindDirection wind_dir = swingmode_to_wind_direction(request.swing_mode.value());
                 req.wind_direction = wind_dir;
+            }
+
+            // Handle preset commands after processing all other properties
+            // This ensures that simultaneous requests like {alt_mode: 0, target_temp: 25, mode: Cool}
+            // will process all properties, not just the preset clearing
+            if (request.alt_mode)
+            {
+                // Send Preset command (0xF5) for mutually exclusive modes
+                // AltMode value 0 means "None" (no preset), any other value means the preset is active
+                AltMode alt_mode_value = request.alt_mode.value();
+                
+                // Handle AltMode=0 (clear preset)
+                if (alt_mode_value == 0)
+                {
+                    // AltMode 0 means no preset - turn off the current preset and clear the hint
+                    AltMode old_hint = get_preset_hint(address);
+                    AltMode preset_to_clear = 0;
+                    
+                    // Use hint if available (it's always updated when we receive Cmd28/CmdF5)
+                    if (old_hint > 0 && is_valid_preset_hint(old_hint))
+                    {
+                        preset_to_clear = old_hint;
+                    }
+                    
+                    // If we found a preset to clear, send OFF command
+                    if (preset_to_clear > 0)
+                    {
+                        send_preset_command(target, address, preset_to_clear, false);
+                    }
+                    
+                    // Clear the hint (AltMode=0)
+                    clear_preset_hint(address);
+                    
+                    // Check if there are any other properties to queue
+                    // If not, return early (preset clearing only)
+                    bool has_other_properties = request.mode.has_value() || 
+                                                request.power.has_value() || 
+                                                request.target_temp.has_value() || 
+                                                request.fan_mode.has_value() || 
+                                                request.swing_mode.has_value();
+                    
+                    if (!has_other_properties)
+                    {
+                        return; // Don't queue NonNasaRequest for preset clear only
+                    }
+                    // Otherwise, continue to queue the request with other properties
+                }
+                else
+                {
+                    // Validate alt_mode_value before setting hint and sending command
+                    if (!is_valid_preset_hint(alt_mode_value))
+                    {
+                        LOGW("Invalid alt_mode_value %d for device %s - not sending preset command (valid values: 2=Quiet, 3=Fast, 4=Comfort, 5=Single User, 10=SPi)",
+                            alt_mode_value, address.c_str());
+                        
+                        // Check if there are any other properties to queue
+                        // If not, return early (invalid preset only)
+                        bool has_other_properties = request.mode.has_value() || 
+                                                    request.power.has_value() || 
+                                                    request.target_temp.has_value() || 
+                                                    request.fan_mode.has_value() || 
+                                                    request.swing_mode.has_value();
+                        
+                        if (!has_other_properties)
+                        {
+                            return; // Don't queue NonNasaRequest for invalid preset only
+                        }
+                        // Otherwise, continue to queue the request with other properties (skip invalid preset)
+                    }
+                    else
+                    {
+                        // Note: Presets are only available in Cool and Heat modes, but we let the device validate
+                        // rather than checking mode here. This simplifies the code and reduces maintenance burden.
+                        // The device will reject/ignore preset commands sent in Auto/Fan/Dry modes.
+                        
+                        // Track the last preset sent BEFORE sending the command to ensure hint is available when 0x28 responses arrive
+                        set_preset_hint(address, alt_mode_value);
+                        
+                        // Send preset ON command
+                        send_preset_command(target, address, alt_mode_value, true);
+                    }
+                }
             }
 
             // Add to the queue with the current time
@@ -794,8 +1433,16 @@ namespace esphome
                     // TODO
                     target->set_water_heater_mode(nonpacket_.src, nonnasa_water_heater_mode_to_mode(-0));
                     target->set_fanmode(nonpacket_.src, nonnasa_fanspeed_to_fanmode(nonpacket_.command20.fanspeed));
-                    // TODO
-                    target->set_altmode(nonpacket_.src, 0);
+                    // Cmd20 does NOT contain preset information - only Cmd28 does
+                    // Don't clear preset here - use hint if available, otherwise leave unchanged
+                    // This prevents Cmd20 from clearing the preset when switching presets
+                    AltMode hint_value = 0;
+                    if (get_valid_preset_hint(nonpacket_.src, hint_value))
+                    {
+                        // Use hint to maintain preset state (Cmd20 arrives frequently and shouldn't clear preset)
+                        target->set_altmode(nonpacket_.src, hint_value);
+                    }
+                    // If no hint, don't change preset - let Cmd28 handle it
                     // Cmd20 swing decode: converting wind_direction to vertical/horizontal booleans
                     target->set_swing_horizontal(nonpacket_.src,
                                                  (nonpacket_.command20.wind_direction == NonNasaWindDirection::Horizontal) ||
@@ -853,6 +1500,167 @@ namespace esphome
                     LOGW("s:%s d:%s CmdF0 outdoor_unit_error_code %d", nonpacket_.src.c_str(), nonpacket_.dst.c_str(), error_code);
                 }
                 target->set_error_code(nonpacket_.src, error_code);
+            }
+            else if (nonpacket_.cmd == NonNasaCommand::Cmd1C)
+            {
+                // Cmd1C comes from the indoor unit and contains feature status
+                // Byte 4: Bit 0 = Beep, Bit 3 = Clean, etc.
+                // Note: No pending control message check needed - feature status is independent
+                uint8_t status_byte = nonpacket_.command1C.feature_status_byte;
+                
+                // Extract Clean status (Bit 3)
+                bool clean_on = (status_byte & 0x08) != 0;
+                target->set_automatic_cleaning(nonpacket_.src, clean_on);
+                
+                // Extract Beep status (Bit 0)
+                bool beep_on = (status_byte & 0x01) != 0;
+                target->set_beep(nonpacket_.src, beep_on);
+            }
+            else if (nonpacket_.cmd == NonNasaCommand::Cmd21)
+            {
+                // Cmd21 comes from the indoor unit and contains Display status
+                // Byte 7: Display ON/OFF status (tentative - needs confirmation)
+                // Based on analysis: Byte 7 might indicate Display state
+                // For now, extract and publish (needs confirmation of exact meaning)
+                uint8_t display_status = nonpacket_.command21.display_status;
+                // TODO: Confirm Byte 7 meaning - might be 0x01=ON, 0x02=OFF or bit-encoded
+                // For now, assume non-zero means ON (needs verification)
+                bool display_on = (display_status != 0);
+                target->set_display(nonpacket_.src, display_on);
+            }
+            else if (nonpacket_.cmd == NonNasaCommand::CmdF5)
+            {
+                // CmdF5 is a preset control command that can be sent by us or the remote control
+                // When we receive it (from remote or echoed back), we extract the preset type from Byte 4
+                // and use it as a hint to resolve ambiguous 0x28 status responses
+                uint8_t preset_byte4 = nonpacket_.commandF5.preset_byte4;
+                AltMode preset_altmode = f5_byte4_to_altmode(preset_byte4);
+                
+                if (preset_altmode > 0 && is_valid_preset_hint(preset_altmode))
+                {
+                    // Set hint so we can resolve ambiguous 0x28 responses
+                    // This works for both commands we send (echoed back) and remote control commands
+                    // Note: We use dst (destination) because 0xF5 goes TO the indoor unit
+                    //       Cmd28 uses src (source) because it comes FROM the indoor unit
+                    //       These should be the same address (indoor unit)
+                    AltMode old_hint = get_preset_hint(nonpacket_.dst);
+                    set_preset_hint(nonpacket_.dst, preset_altmode);
+                    
+                }
+            }
+            else if (nonpacket_.cmd == NonNasaCommand::Cmd28)
+            {
+                // Cmd28 comes from the indoor unit and contains preset/mode status
+                // Byte 4: Current preset/mode status
+                uint8_t preset_status = nonpacket_.command28.preset_status;
+
+                // Resolve hint (check src first, fallback to dst if needed)
+                AltMode hint = get_preset_hint(nonpacket_.src);
+                bool hint_exists = (hint > 0);
+                bool used_fallback = false;
+
+                if (!hint_exists)
+                {
+                    // Fallback: try dst if src doesn't have hint (address mismatch case)
+                    AltMode dst_hint = get_preset_hint(nonpacket_.dst);
+                    if (dst_hint > 0)
+                    {
+                        hint = dst_hint;
+                        hint_exists = true;
+                        used_fallback = true;
+
+                        if (debug_log_messages && nonpacket_.src != nonpacket_.dst)
+                        {
+                            LOGW("Cmd28 from %s: Using dst hint (AltMode=%d) - src hint not found (address mismatch: src=%s, dst=%s)",
+                                nonpacket_.src.c_str(), hint, nonpacket_.src.c_str(), nonpacket_.dst.c_str());
+                        }
+                    }
+                }
+
+                // Warn if address mismatch when both hints exist (shouldn't happen, but helps debug)
+                if (debug_log_messages && hint_exists && nonpacket_.src != nonpacket_.dst)
+                {
+                    AltMode dst_hint = get_preset_hint(nonpacket_.dst);
+                    if (dst_hint > 0 && dst_hint != hint)
+                    {
+                        LOGW("Cmd28 from %s: Address mismatch detected - hint exists for both src=%s (AltMode=%d) and dst=%s (AltMode=%d), using src hint",
+                            nonpacket_.src.c_str(), nonpacket_.src.c_str(), hint, nonpacket_.dst.c_str(), dst_hint);
+                    }
+                }
+
+                // Resolve preset status to AltMode
+                bool has_valid_hint = hint_exists && is_valid_preset_hint(hint);
+                auto [alt_mode, should_update] = resolve_cmd28_preset_status(
+                    preset_status, hint, hint_exists, nonpacket_.src);
+
+                // Update preset state if needed
+                if (should_update)
+                {
+                    target->set_altmode(nonpacket_.src, alt_mode);
+
+                    // Update hint tracking with confirmed status (always update to reflect latest state)
+                    // This ensures hint is available for clearing even if device was in preset at startup
+                    // Exception: For unknown status (>0x03) with valid hint, preserve hint for future resolution
+                    if (preset_status > 0x03 && has_valid_hint)
+                    {
+                        // Preserve hint for future ambiguous status resolution
+                        // Don't update hint - keep the existing one
+                    }
+                    else
+                    {
+                        set_preset_hint(nonpacket_.src, alt_mode);
+                    }
+                    
+                    // Note: We don't clear hints on 0x00 because:
+                    // 1. 0x00 might be a transition state when switching presets
+                    // 2. Hints are only used to resolve ambiguous status (0x01/0x02)
+                    // 3. Hints are explicitly cleared when user selects AltMode=0
+                    // 4. Hints are overwritten when we get confirmed status (alt_mode > 0)
+                }
+
+                // Handle unknown status values (>0x03)
+                if (preset_status > 0x03)
+                {
+                    // Unknown preset status value - log warning but preserve hint
+                    // Unknown status might be:
+                    // 1. A transient error
+                    // 2. A future protocol extension
+                    // 3. A device-specific quirk
+                    // Preserving the hint allows future ambiguous status to still be resolved
+                    if (debug_log_messages)
+                    {
+                        AltMode old_hint = get_preset_hint(nonpacket_.src);
+                        if (old_hint > 0)
+                        {
+                            const char* old_name = get_preset_name(old_hint);
+                            LOGW("Cmd28 from %s: Unknown preset_status=0x%02x (preserving hint: %s) - might be transient error or protocol extension",
+                                nonpacket_.src.c_str(), preset_status, old_name);
+                        }
+                        else
+                        {
+                            LOGW("Cmd28 from %s: Unknown preset_status=0x%02x (mapped to None, no hint to preserve)",
+                                nonpacket_.src.c_str(), preset_status);
+                        }
+                    }
+                }
+            }
+            else if (nonpacket_.cmd == NonNasaCommand::Cmd2F)
+            {
+                // Cmd2F comes from the indoor unit and contains usage statistics
+                // Byte 9 and Byte 11: Electricity consumption raw values
+                // Manual states display shows 0.1-99 kWh, but exact conversion formula is unknown
+                // These are raw byte values (0-255) that represent electricity consumption statistics
+                uint8_t usage_statistic_1 = nonpacket_.command2F.usage_byte_9;   // Byte 9: Raw statistic
+                uint8_t usage_statistic_2 = nonpacket_.command2F.usage_byte_11;  // Byte 11: Raw statistic
+                
+                // Publish usage statistics as custom sensors
+                // Using message numbers that won't conflict with NASA protocol
+                target->set_custom_sensor(nonpacket_.src, 0x2F09, static_cast<float>(usage_statistic_1));
+                target->set_custom_sensor(nonpacket_.src, 0x2F0B, static_cast<float>(usage_statistic_2));
+                
+                // Also publish to dedicated sensors if configured
+                target->set_usage_statistic_1(nonpacket_.src, static_cast<float>(usage_statistic_1));
+                target->set_usage_statistic_2(nonpacket_.src, static_cast<float>(usage_statistic_2));
             }
             else if (nonpacket_.cmd == NonNasaCommand::CmdC6)
             {
@@ -915,6 +1723,7 @@ namespace esphome
                 {
                     send_register_controller(target);
                     last_keepalive_sent_ms_ = now;
+                    last_keepalive_response = now; // For testing
                     pending_keepalive_ = false;
                 }
             }

@@ -24,6 +24,9 @@ namespace esphome
 
     AltModeName preset_to_altmodename(climate::ClimatePreset preset);
     optional<climate::ClimatePreset> altmodename_to_preset(const AltModeName& name);
+    
+    // Helper function to map AltModeName to 0xF5 Byte 4 value for non-NASA protocol
+    uint8_t altmodename_to_f5_byte4_off(const AltModeName& name, bool on);
 
     climate::ClimateSwingMode swingmode_to_climateswingmode(SwingMode swingMode);
     SwingMode climateswingmode_to_swingmode(climate::ClimateSwingMode swingMode);

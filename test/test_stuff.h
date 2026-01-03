@@ -158,11 +158,13 @@ public:
 
     std::string last_set_altmode_address;
     AltMode last_set_altmode_value;
+    bool set_altmode_called = false;
     void set_altmode(const std::string address, AltMode altmode) override
     {
         cout << "> " << address << " set_altmode=" << to_string((int)altmode) << endl;
         last_set_altmode_address = address;
         last_set_altmode_value = altmode;
+        set_altmode_called = true;
     }
 
     std::string last_set_swing_vertical_address;
@@ -251,6 +253,51 @@ public:
         cout << "> " << address << " set_error_code=" << to_string(error_code) << endl;
         last_set_error_code_address = address;
         last_set_error_code_value = error_code;
+    }
+
+    std::string last_set_beep_address;
+    bool last_set_beep_value;
+    void set_beep(const std::string address, bool value) override
+    {
+        cout << "> " << address << " set_beep=" << to_string(value) << endl;
+        last_set_beep_address = address;
+        last_set_beep_value = value;
+    }
+
+    std::string last_set_display_address;
+    bool last_set_display_value;
+    void set_display(const std::string address, bool value) override
+    {
+        cout << "> " << address << " set_display=" << to_string(value) << endl;
+        last_set_display_address = address;
+        last_set_display_value = value;
+    }
+
+    std::string last_set_filter_reset_address;
+    bool last_set_filter_reset_value;
+    void set_filter_reset(const std::string address, bool value)
+    {
+        cout << "> " << address << " set_filter_reset=" << to_string(value) << endl;
+        last_set_filter_reset_address = address;
+        last_set_filter_reset_value = value;
+    }
+
+    std::string last_set_usage_statistic_1_address;
+    float last_set_usage_statistic_1_value;
+    void set_usage_statistic_1(const std::string &address, float value) override
+    {
+        cout << "> " << address << " set_usage_statistic_1=" << to_string(value) << endl;
+        last_set_usage_statistic_1_address = address;
+        last_set_usage_statistic_1_value = value;
+    }
+
+    std::string last_set_usage_statistic_2_address;
+    float last_set_usage_statistic_2_value;
+    void set_usage_statistic_2(const std::string &address, float value) override
+    {
+        cout << "> " << address << " set_usage_statistic_2=" << to_string(value) << endl;
+        last_set_usage_statistic_2_address = address;
+        last_set_usage_statistic_2_value = value;
     }
 
         void assert_only_address(const std::string address)
